@@ -1,0 +1,1 @@
+pyinstaller --clean --onefile --windowed --icon=.\assets\Gemini_Generated_Image_q0cxnoq0cxnoq0cx.jpg --add-data=".\assets\template.xlsx:.\assets" gui.py
