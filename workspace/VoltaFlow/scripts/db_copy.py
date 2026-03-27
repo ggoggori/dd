@@ -93,7 +93,7 @@ def process_file_info(file_list):
             cyc_path = item["fileFullPath"]
         
     return cts_path, cyc_path
-        
+
 def copy_subscripton_tb_to_pipeline_queue_tb():
     # --- 데이터베이스 연결 설정 ---
     # django_test 데이터베이스 연결 정보
@@ -114,6 +114,7 @@ def copy_subscripton_tb_to_pipeline_queue_tb():
     SOURCE_TABLE_NAME = "subscription_data" # 예: 'subscription_data'
     # 대상 테이블 이름 (mart_db DB에 있는 테이블)
     DESTINATION_TABLE_NAME = "pipeline_queue_tb"
+    
     try:
         django_conn = None
         mart_conn = None
@@ -144,23 +145,63 @@ def copy_subscripton_tb_to_pipeline_queue_tb():
         # 원본 테이블의 모든 컬럼을 선택합니다.
         
         df = pd.read_sql(f"SELECT * FROM {SOURCE_TABLE_NAME};", django_conn)
-        df = df[["cell_id", "cell_type", "test_title", "cp", "temperature", "build_type", "build_version", "data_requester"]]
-        
+        df.drop_duplicates(subset=['exp_id', 'cell_id'], keep='first', inplace=True) # 같은 실험을 여러 사람이 요청했을 때는 한 EXP_ID 행만 가져오도록 함.
         print(f"{len(df)}개의 Cell을 읽었습니다.")
         
-        # mart_cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '{DESTINATION_TABLE_NAME}' ORDER BY ordinal_position;")
+        upsert_columns = df.columns
+        insert_cols_str = ', '.join(upsert_columns)
+        placeholders = ', '.join(['%s'] * len(upsert_columns))
 
+        update_columns = [col for col in upsert_columns if col not in ['exp_id', 'cell_id']]
+        condition_str = ' OR '.join([f"public.{DESTINATION_TABLE_NAME}.{col} IS DISTINCT FROM EXCLUDED.{col}" for col in update_columns])
+        
+        path_cols = ['file_full_path_cts', 'file_full_path_cyc']
+        set_items = []
+        for col in update_columns:
+            if col in path_cols:
+                # path 컬럼: 조건부 업데이트 로직 적용
+                item = f"""{col} = CASE 
+                    WHEN EXCLUDED.{col} IS NULL OR EXCLUDED.{col} = '-' 
+                    THEN public.{DESTINATION_TABLE_NAME}.{col} 
+                    ELSE EXCLUDED.{col} 
+                END"""
+            else:
+                # 일반 컬럼: 기존처럼 덮어쓰기
+                item = f"{col} = EXCLUDED.{col}"
+            set_items.append(item)
+
+        set_clause = ', '.join(set_items)
+
+        upsert_query = f"""
+            INSERT INTO public.{DESTINATION_TABLE_NAME} ({insert_cols_str})
+            VALUES ({placeholders})
+            ON CONFLICT (exp_id, cell_id) DO UPDATE SET
+                {set_clause}
+            WHERE {condition_str};
+        """
+        
+        print(f"'{DESTINATION_TABLE_NAME}' 테이블에 데이터 삽입/업데이트 중...")
+        mart_cursor.executemany(upsert_query, df.values)
+        mart_conn.commit() # 변경사항 커밋
+        print(f"'{DESTINATION_TABLE_NAME}' 테이블에 {mart_cursor.rowcount}개의 행이 성공적으로 처리되었습니다 (삽입 또는 업데이트).")
+        
+        mart_df = pd.read_sql(f"SELECT * FROM public.{DESTINATION_TABLE_NAME};", mart_conn)
+        temp = mart_df.query("file_full_path_cts.isnull()|file_full_path_cyc.isnull()")
+        print(f"업데이트 된 '{DESTINATION_TABLE_NAME}' 테이블 중 CTS,CYC,DAT path가 없는 EXP/Cell의 정보를 업데이트 합니다.")
+        print(f"총 {len(temp)} 개 업데이트 시작")
+        
         dfs = []
-        for _, row in df.iterrows():
+        for _, row in temp.iterrows():
             for site in ['cn', 'kr']:
                 # 1-1. request_test_results 호출 (함수화)
                 search_result = get_test_results(site, row['test_title'])
                 if search_result.empty:
                     continue
-                # 1-2. 원본 df의 행 정보를 search_result에 복사
-                for col in ["cell_id", "cell_type", "cp", "temperature", "build_type", "build_version", "data_requester"]:
-                    search_result[col] = row[col]
-    
+                
+                search_result = search_result[search_result["testId"] == row['exp_id']]
+                
+                search_result["cell_id"] = row["cell_id"]
+
                 # 1-3. 파일 경로 데이터 수집 및 병합
                 search_result['file_paths'] = search_result['testId'].apply(lambda x: get_file_paths(site, x))
                 
@@ -172,71 +213,39 @@ def copy_subscripton_tb_to_pipeline_queue_tb():
                 if not "testEndDatetime" in search_result.columns:
                     search_result["testEndDatetime"] = None
                 # 1-5. 최종 결과 리스트에 추가
+
                 dfs.append(search_result)
                 
         final_df = pd.concat(dfs, ignore_index=True)
-        final_df.drop_duplicates(subset=['testId'], keep='first', inplace=True) # 같은 실험을 여러 사람이 요청했을 때는 한 EXP_ID 행만 가져오도록 함.
-        # 3. 필요한 컬럼만 선택하여 upsert 쿼리 준비
-        # 원하는 컬럼 목록을 리스트로 정의
-        required_columns = ["testId", "data_requester", "userName", "deptNm", "cell_id", "cell_type", "cp", "temperature", "build_type", "build_version", "workplaceNm", 
-                            "testStateNm", "outterIp", "testTitle", "testFullTitle", "testStateCd", "testStartDatetime", "testEndDatetime", "firstChnnStartDatetime", 
-                            "lastChnnEndDatetime", "testFileLastUploadDatetime", "file_full_path_cts", "file_full_path_cyc"]
-     
-        insert_df = final_df[required_columns] 
-        insert_df = insert_df.rename(columns={'testId': 'exp_id', 
-                                            'userName': 'test_requester', 
-                                            'deptNm': 'test_requester_team', 
-                                            'workplaceNm': 'test_site', 
-                                            'testStateNm': 'test_state', 
-                                            'outterIp': 'outter_ip', 
-                                            'testTitle': 'test_title', 
-                                            'testFullTitle': 'test_full_title', 
-                                            'testStateCd': 'test_file_upload_request_state', 
-                                            'testStartDatetime': 'test_start_datetime', 
-                                            'testEndDatetime': 'test_end_datetime', 
-                                            'firstChnnStartDatetime': 'first_chnn_start_datetime', 
-                                            'lastChnnEndDatetime': 'last_chnn_end_datetime', 
-                                            'testFileLastUploadDatetime': 'test_file_last_upload_datetime'})
-        upsert_columns = insert_df.columns
-        # UPSERT 쿼리 생성
-        # 대상 테이블의 'exp_id' 컬럼에 UNIQUE 제약 조건 또는 PRIMARY KEY가 설정되어 있어야 합니다.
-        # 만약 설정되어 있지 않다면, 'ALTER TABLE public.pipeline_queue_tb ADD CONSTRAINT unique_exp_id UNIQUE (exp_id);' 와 같이 추가해야 합니다.
+        insert_df = final_df[["testId", "cell_id", "file_full_path_cts", "file_full_path_cyc"]].rename(columns={'testId': 'exp_id'})
         
-        # INSERT 부분에 사용될 컬럼 목록과 플레이스홀더
-        insert_cols_str = ', '.join(upsert_columns)
-        placeholders = ', '.join(['%s'] * len(upsert_columns))
+        # 1. 쿼리의 %s 순서에 맞게 데이터 리스트 구성 (순서: cts, cyc, state, exp_id, cell_id)
+        update_params = []
+        for _, row in insert_df.iterrows():
+            update_params.append((
+                row['file_full_path_cts'], 
+                row['file_full_path_cyc'], 
+                row['exp_id'], 
+                row['cell_id']
+            ))
 
-        # DO UPDATE SET 부분에 사용될 컬럼 목록 (exp_id 제외)
-        # 이 컬럼들이 변경되었을 때만 업데이트가 일어납니다.
-        update_cols = ['exp_id', 'test_state', 'test_file_upload_request_state', 'test_end_datetime', 'last_chnn_end_datetime', 'test_file_last_upload_datetime']
-        # 특정 컬럼이 바뀌었을 때만 업데이트되도록 WHERE 절 추가
-        # 'target'은 현재 테이블에 존재하는 행을, 'EXCLUDED'는 삽입하려는 새 행을 나타냅니다.
-        # 'IS DISTINCT FROM'은 NULL 값을 안전하게 비교하여 값이 다른 경우에만 TRUE를 반환합니다.
-        where_clause_parts = []
-        for col in update_cols:
-            where_clause_parts.append(f"{DESTINATION_TABLE_NAME}.{col} IS DISTINCT FROM EXCLUDED.{col}")
-
-        where_clause = ""
-        if where_clause_parts:
-            where_clause = f" WHERE {' OR '.join(where_clause_parts)}"
-        
-        set_clause = ', '.join([f"{col} = EXCLUDED.{col}" for col in upsert_columns])
-        
-        upsert_query = f"""
-            INSERT INTO public.{DESTINATION_TABLE_NAME} ({insert_cols_str})
-            VALUES ({placeholders})
-            ON CONFLICT (exp_id) DO UPDATE SET
-                {set_clause}
-            {where_clause};
+        # 2. 단순 UPDATE 쿼리 정의
+        update_query = f"""
+            UPDATE public.{DESTINATION_TABLE_NAME}
+            SET 
+                file_full_path_cts = %s,
+                file_full_path_cyc = %s
+            WHERE exp_id = %s AND cell_id = %s;
         """
+        # 3. 실행 및 커밋
+        if update_params:
+            print(f"'{DESTINATION_TABLE_NAME}' 테이블 경로 업데이트 시작... (대상: {len(update_params)}건)")
+            mart_cursor.executemany(update_query, update_params)
+            mart_conn.commit()
+            print(f"업데이트 완료: {len(update_params)}개의 행에 대해 경로 정보가 반영되었습니다.")
+        else:
+            print("업데이트할 대상 데이터가 없습니다.")
         
-        # 5. mart_db에 데이터 삽입/업데이트
-        print(f"'{DESTINATION_TABLE_NAME}' 테이블에 데이터 삽입/업데이트 중...")
-        # executemany를 사용하여 여러 행을 한 번에 처리합니다.
-        mart_cursor.executemany(upsert_query, insert_df.values)
-        mart_conn.commit() # 변경사항 커밋
-        print(f"'{DESTINATION_TABLE_NAME}' 테이블에 {mart_cursor.rowcount}개의 행이 성공적으로 처리되었습니다 (삽입 또는 업데이트).")
-    
     except (Exception, Error) as error:
         print(f"데이터베이스 작업 중 오류 발생: {error}")
         if mart_conn:
@@ -255,6 +264,7 @@ def copy_subscripton_tb_to_pipeline_queue_tb():
             mart_conn.close()
             print(f"{DB_MART_NAME} 데이터베이스 연결 종료.")
 
+            
 def main():
     copy_subscripton_tb_to_pipeline_queue_tb()
     

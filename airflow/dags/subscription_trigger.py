@@ -55,12 +55,16 @@ def get_cell_id_from_conf(**context):
     title = context['dag_run'].conf.get('title')
     user_email = context['dag_run'].conf.get('user_email')
     exp_id = context['dag_run'].conf.get('exp_id')
+    cts_path = context['dag_run'].conf.get('file_full_path_cts', "")
+    cyc_path = context['dag_run'].conf.get('file_full_path_cyc', "")
 
     if cell_id and title:
         context['ti'].xcom_push(key='cell_id', value=cell_id)
-        context['ti'].xcom_push(key='title', value=title)
+        context['ti'].xcom_push(key='title', value=title)s
         context['ti'].xcom_push(key='user_email', value=user_email)
         context['ti'].xcom_push(key='exp_id', value=exp_id)
+        context['ti'].xcom_push(key='cts_path', value=cts_path)
+        context['ti'].xcom_push(key='cyc_path', value=cyc_path)
 
         print(f"Cell ID:{cell_id} / title:{title} / mail:{user_email} / EXP ID:{exp_id} 을 Xcom에 성공적으로 저장.")
         return cell_id
@@ -100,8 +104,10 @@ with DAG(
         TITLE="{{task_instance.xcom_pull(task_ids='get_cell_id_from_conf', key='title')}}"
         USER_EMAIL="{{task_instance.xcom_pull(task_ids='get_cell_id_from_conf', key='user_email')}}"
         EXP_ID="{{task_instance.xcom_pull(task_ids='get_cell_id_from_conf', key='exp_id')}}"
+        CTS_PATH="{{task_instance.xcom_pull(task_ids='get_cell_id_from_conf', key='cts_path')}}"
+        CYC_PATH="{{task_instance.xcom_pull(task_ids='get_cell_id_from_conf', key='cyc_path')}}"
 
-        python ./subscription_trigger.py --cell_id="$CELL_ID" --title="$TITLE" --user_email="$USER_EMAIL" --exp_id="$EXP_ID"
+        python ./subscription_trigger.py --cell_id="$CELL_ID" --title="$TITLE" --user_email="$USER_EMAIL" --exp_id="$EXP_ID" --cts_path="$CTS_PATH" --cyc_path="$CYC_PATH"
         """,
     )
 

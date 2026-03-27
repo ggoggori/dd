@@ -63,7 +63,7 @@ user = os.getenv("DB_USER")
 password = os.getenv("DB_PASSWORD")
 port = os.getenv("DB_PORT")
 
-def check_data_availability(exp_id):
+def check_data_availability(cell_id, exp_id):
     """
     exp_id 기반으로 데이터 존재 여부 확인.
     """
@@ -72,7 +72,7 @@ def check_data_availability(exp_id):
         db_conn.connect()
         DESTINATION_TABLE_NAME = "exp_fact_tb"
         query = f"""SELECT * FROM {DESTINATION_TABLE_NAME} 
-        WHERE exp_id = '{exp_id}';
+        WHERE exp_id = '{exp_id}' and cell_id = '{cell_id}';
         """
         exp_fact_tb = db_conn.fetch_data(query ,as_dataframe=True)
         
@@ -89,7 +89,7 @@ def check_data_availability(exp_id):
     else:
         return False
 
-def get_info(title, cell_id):
+def get_info(title, cell_id, exp_id):
     """ cell_id 기반 TOS 검색해서 정보 추출.
 
     Args:
@@ -99,8 +99,8 @@ def get_info(title, cell_id):
         _type_: _description_
     """
     
-    print("title:", title)
-    print("cell_id:", cell_id)
+    print(f"title: {title} / cell_id: {cell_id} / exp_id: {exp_id}")
+    
     search_results = []
     for site in ['cn', 'kr']:
         # 1-1. request_test_results 호출 (함수화)
@@ -108,7 +108,7 @@ def get_info(title, cell_id):
         print(site, "검색 결과 수:", len(search_result))
         if search_result.empty:
             continue
-        
+        search_result = search_result[search_result["testId"] == exp_id]
         search_result['file_paths'] = search_result['testId'].apply(lambda x: get_file_paths(site, x))
                         # 1-4. 파일 경로 정보 추출
         search_result[['file_full_path_cts', 'file_full_path_cyc']] = search_result['file_paths'].apply(
@@ -204,8 +204,6 @@ def download_and_upload_minio(pipeline_queue_tb):
         minio_paths.append(minio_path)
         upload_to_minio(output_path, "tos-stepend", minio_path)
 
-        time.sleep(1)
-
     return minio_paths
 
 def process_minio_to_db(minio_paths):
@@ -229,19 +227,26 @@ if __name__ == "__main__":
     parser.add_argument("--title", type=str, required=True, help="title to search")
     parser.add_argument("--user_email", type=str, required=True)
     parser.add_argument("--exp_id", type=str, required=True)
+    parser.add_argument("--cts_path", type=str, required=False)
+    parser.add_argument("--cyc_path", type=str, required=False)
     args = parser.parse_args()
     
     cell_id = args.cell_id
     title = args.title
     user_email = args.user_email
     exp_id = args.exp_id
+    cts_path = args.cts_path
+    cyc_path = args.cyc_path
     
     try:
-        search_results = get_info(title, cell_id)
-        flag = check_data_availability(exp_id)
+        flag = check_data_availability(cell_id,exp_id)
         if flag == False:
+            search_results = get_info(title, cell_id, exp_id)
             request_data(search_results)
-            # time.sleep(180) # 데이터 요청 후 대기시간
+            if (cts_path != "" or cts_path is not None) and len(cts_path) > 10:
+                search_results["file_full_path_cts"] = cts_path
+                search_results["file_full_path_cyc"] = cyc_path # 한 EXP_ID에 시험이 여러 개 인 경우 대비하여 받아온 path로 변경
+
             minio_paths = download_and_upload_minio(search_results)
             process_minio_to_db(minio_paths)
         else:
