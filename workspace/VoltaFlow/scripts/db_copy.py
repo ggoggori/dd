@@ -8,6 +8,7 @@ import sys
 # sys.path에 상위 폴더(..)를 추가합니다.
 sys.path.append("..")
 import os
+import time
 
 header_kr = { 
     'Accept': 'application/json, text/javascript, */*; q=0.01',
@@ -145,7 +146,10 @@ def copy_subscripton_tb_to_pipeline_queue_tb():
         # 원본 테이블의 모든 컬럼을 선택합니다.
         
         df = pd.read_sql(f"SELECT * FROM {SOURCE_TABLE_NAME};", django_conn)
-        df.drop_duplicates(subset=['exp_id', 'cell_id'], keep='first', inplace=True) # 같은 실험을 여러 사람이 요청했을 때는 한 EXP_ID 행만 가져오도록 함.
+        df['_has_path'] = ~((df['file_full_path_cts'].isnull()) | (df['file_full_path_cts'] == '-')) # 경로 있는 애들을 우선으로 남기기 위해 추가.
+        df.sort_values(by='_has_path', ascending=False, inplace=True)
+        df.drop_duplicates(subset=['exp_id', 'cell_id'], keep='first', inplace=True)# 같은 실험을 여러 사람이 요청했을 때는 한 EXP_ID 행만 가져오도록 함.
+        df.drop(columns=['_has_path'], inplace=True)
         print(f"{len(df)}개의 Cell을 읽었습니다.")
         
         upsert_columns = df.columns
@@ -186,35 +190,45 @@ def copy_subscripton_tb_to_pipeline_queue_tb():
         print(f"'{DESTINATION_TABLE_NAME}' 테이블에 {mart_cursor.rowcount}개의 행이 성공적으로 처리되었습니다 (삽입 또는 업데이트).")
         
         mart_df = pd.read_sql(f"SELECT * FROM public.{DESTINATION_TABLE_NAME};", mart_conn)
-        temp = mart_df.query("file_full_path_cts.isnull()|file_full_path_cyc.isnull()")
+        temp = mart_df.query(
+                    "(file_full_path_cts.isnull() | file_full_path_cts == '-') | "
+                    "(file_full_path_cyc.isnull() | file_full_path_cyc == '-')")
         print(f"업데이트 된 '{DESTINATION_TABLE_NAME}' 테이블 중 CTS,CYC,DAT path가 없는 EXP/Cell의 정보를 업데이트 합니다.")
         print(f"총 {len(temp)} 개 업데이트 시작")
         
         dfs = []
+        KR_SITES = {"EP2", "대전", "마곡"}
         for _, row in temp.iterrows():
-            for site in ['cn', 'kr']:
-                # 1-1. request_test_results 호출 (함수화)
-                search_result = get_test_results(site, row['test_title'])
-                if search_result.empty:
-                    continue
-                
-                search_result = search_result[search_result["testId"] == row['exp_id']]
-                
-                search_result["cell_id"] = row["cell_id"]
+            # 1-1. request_test_results 호출 (함수화)
+            if row['test_site'] in KR_SITES:
+                site = 'kr'
+            else:
+                site = 'cn'
+            print(f"EXP_ID: {row['exp_id']}, CELL_ID: {row['cell_id']} site: {row['test_site']} - {site}에서 테스트 결과 검색 중...")
+            search_result = get_test_results(site, row['test_title'])
+            if search_result.empty:
+                print("검색 결과가 없습니다.")
+                continue
+            
+            search_result = search_result[search_result["testId"] == row['exp_id']]
+            
+            search_result["cell_id"] = row["cell_id"]
 
-                # 1-3. 파일 경로 데이터 수집 및 병합
-                search_result['file_paths'] = search_result['testId'].apply(lambda x: get_file_paths(site, x))
-                
-                # 1-4. 파일 경로 정보 추출
-                search_result[['file_full_path_cts', 'file_full_path_cyc']] = search_result['file_paths'].apply(
-                    lambda x: pd.Series(process_file_info(x))
-                )
-                
-                if not "testEndDatetime" in search_result.columns:
-                    search_result["testEndDatetime"] = None
-                # 1-5. 최종 결과 리스트에 추가
-
-                dfs.append(search_result)
+            # 1-3. 파일 경로 데이터 수집 및 병합
+            search_result['file_paths'] = search_result['testId'].apply(lambda x: get_file_paths(site, x))
+            
+            # 1-4. 파일 경로 정보 추출
+            search_result[['file_full_path_cts', 'file_full_path_cyc']] = search_result['file_paths'].apply(
+                lambda x: pd.Series(process_file_info(x))
+            )
+            
+            if not "testEndDatetime" in search_result.columns:
+                search_result["testEndDatetime"] = None
+            # 1-5. 최종 결과 리스트에 추가
+            print(f"검색 완료: EXP_ID: {row['exp_id']}, CELL_ID: {row['cell_id']} - CTS/CYC 경로 정보가 업데이트됩니다.")
+            dfs.append(search_result)
+            
+            time.sleep(5)
                 
         final_df = pd.concat(dfs, ignore_index=True)
         insert_df = final_df[["testId", "cell_id", "file_full_path_cts", "file_full_path_cyc"]].rename(columns={'testId': 'exp_id'})

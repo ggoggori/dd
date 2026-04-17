@@ -62,8 +62,8 @@ def insert_to_db(df, cell_id, exp_id):
         DESTINATION_TABLE_NAME = "exp_fact_tb"
         
         # 1. 중복 체크
-        query = f"SELECT * FROM {DESTINATION_TABLE_NAME} WHERE exp_id = %s;"
-        temp_db = db_conn.fetch_data(query, params=(exp_id,), as_dataframe=True)
+        query = f"SELECT * FROM {DESTINATION_TABLE_NAME} WHERE exp_id = %s and cell_id = %s;"
+        temp_db = db_conn.fetch_data(query, params=(exp_id, cell_id), as_dataframe=True)
         temp_db = temp_db.drop("serial_id", axis=1, errors='ignore')
         
         if not temp_db.empty and temp_db.shape[0] == df.shape[0]:
@@ -71,8 +71,8 @@ def insert_to_db(df, cell_id, exp_id):
             return
         
         # 2. 삭제 후 재삽입
-        delete_query = f"DELETE FROM {DESTINATION_TABLE_NAME} WHERE exp_id = %s;"
-        db_conn.cursor.execute(delete_query, (exp_id,))
+        delete_query = f"DELETE FROM {DESTINATION_TABLE_NAME} WHERE exp_id = %s and cell_id = %s;"
+        db_conn.cursor.execute(delete_query, (exp_id, cell_id))
         
         cols = temp_db.columns
         insert_cols = ', '.join(cols)

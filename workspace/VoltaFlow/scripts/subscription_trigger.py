@@ -172,6 +172,7 @@ def request_data(pipeline_queue_tb):
             print(row["test_title"], row["exp_id"], "데이터 요청 실패", res.status_code)
 
 def download_and_upload_minio(pipeline_queue_tb):
+    
     cur_dir = Path(os.path.dirname(os.path.abspath(__file__)))
     temp_folder = cur_dir.parent / "tmp"
     minio_paths = []
@@ -242,11 +243,20 @@ if __name__ == "__main__":
         flag = check_data_availability(cell_id,exp_id)
         if flag == False:
             search_results = get_info(title, cell_id, exp_id)
-            request_data(search_results)
+            print(search_results["file_full_path_cts"])
+
+            if search_results["file_full_path_cts"].isnull().all() == True: # 260416 hotfix: 첫 요청으로 path 없는 경우는 요청 후 다시 get_info 호출 
+                request_data(search_results)
+                print("60초 대기")
+                time.sleep(60)
+                search_results = get_info(title, cell_id, exp_id)
+            else:
+                request_data(search_results)
+
             if (cts_path != "" or cts_path is not None) and len(cts_path) > 10:
                 search_results["file_full_path_cts"] = cts_path
                 search_results["file_full_path_cyc"] = cyc_path # 한 EXP_ID에 시험이 여러 개 인 경우 대비하여 받아온 path로 변경
-
+                
             minio_paths = download_and_upload_minio(search_results)
             process_minio_to_db(minio_paths)
         else:

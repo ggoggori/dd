@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  - name: minio_source
+    tables:
+      - name: step_end
+        meta:
+          external_location: 's3://tos-stepend/*/*/*.parquet'
+  - name: pg_db
+    database: postgres_db
+    schema: public
+    tables:
+      - name: pipeline_queue_tb

@@ -1,0 +1,5 @@
+version: 2
+
+models:
+  - name: stg_battery_data          # SQL 파일명과 동일해야 함 (stg_sensor_data.sql)
+    description: "스테이징 모델"

@@ -1,0 +1,10 @@
+version: 2
+
+models:
+  - name: mart_battery_data          # SQL 파일명과 동일해야 함 (stg_sensor_data.sql)
+    description: "battery mart"
+    columns:
+      - name: serial_id            # 새로 생성한 서로게이트 키
+        description: "surrogate key for each cell_id,exp_id"
+        tests:
+          - not_null               # 비어있으면 에러
